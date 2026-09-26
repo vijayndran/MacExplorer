@@ -6,9 +6,21 @@ cd "$(dirname "$0")"
 APP_DIR="/Applications/MacExplorer.app"
 ENTITLEMENTS="MacExplorer/MacExplorer.entitlements"
 
+# If the source lives on a non-native filesystem (e.g. an ExFAT USB drive),
+# SwiftPM's .build tree — symlinks + codesigned bundles — can't be written
+# there. Build into a local scratch dir in that case.
+FSTYPE="$(stat -f%T . 2>/dev/null || echo unknown)"
+SCRATCH_ARGS=""
+if [ "$FSTYPE" != "apfs" ] && [ "$FSTYPE" != "hfs" ]; then
+    SCRATCH_DIR="${TMPDIR:-/tmp}/macexplorer-build"
+    mkdir -p "$SCRATCH_DIR"
+    SCRATCH_ARGS="--scratch-path $SCRATCH_DIR"
+    echo "(source on '$FSTYPE' filesystem — building into $SCRATCH_DIR)"
+fi
+
 echo "Building..."
-swift build --disable-sandbox 2>&1 | tail -3
-BIN_DIR="$(swift build --disable-sandbox --show-bin-path 2>/dev/null)"
+swift build --disable-sandbox $SCRATCH_ARGS 2>&1 | tail -3
+BIN_DIR="$(swift build --disable-sandbox $SCRATCH_ARGS --show-bin-path 2>/dev/null)"
 
 echo "Deploying to /Applications..."
 mkdir -p "$APP_DIR/Contents/MacOS"

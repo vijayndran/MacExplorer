@@ -131,6 +131,9 @@ struct ExplorerWindow: View {
                     }
                 }
                 Button("Later", role: .cancel) {}
+                Button("Don't Ask Again") {
+                    UserDefaults.standard.set(true, forKey: "fdaAlertSuppressed")
+                }
             } message: {
                 Text("MacExplorer needs Full Disk Access to browse all folders.\n\n1. Click \"Open System Settings\" below\n2. Click the + button in Full Disk Access\n3. Select MacExplorer from the Finder window that opens\n\nAlternatively, drag MacExplorer.app into the list.")
             }
@@ -151,16 +154,44 @@ struct ExplorerWindow: View {
     }
 
     private func checkFullDiskAccess() {
-        let testPaths = [
-            "\(NSHomeDirectory())/Library/Safari",
-            "\(NSHomeDirectory())/Library/Mail"
+        // Don't nag if the user already dismissed this or we confirmed access before.
+        if UserDefaults.standard.bool(forKey: "fdaAlertSuppressed") { return }
+
+        if Self.hasFullDiskAccess() {
+            // Remember success so we never probe-and-prompt again on later launches.
+            UserDefaults.standard.set(true, forKey: "fdaAlertSuppressed")
+            return
+        }
+        showFullDiskAccessAlert = true
+    }
+
+    /// Real Full Disk Access probe. `isReadableFile` only checks POSIX perms and
+    /// is NOT gated by TCC, so it gives false negatives (prompting when access is
+    /// actually granted). The reliable signal is whether we can genuinely READ the
+    /// CONTENTS of a TCC-protected location — that read is what FDA governs.
+    static func hasFullDiskAccess() -> Bool {
+        let home = NSHomeDirectory()
+        // TCC-protected locations. We only need ONE to succeed. Try to actually
+        // enumerate/read them, not just stat — enumeration is what TCC blocks.
+        let protectedDirs = [
+            "\(home)/Library/Safari",
+            "\(home)/Library/Mail",
+            "\(home)/Library/Application Support/com.apple.TCC",
+            "/Library/Application Support/com.apple.TCC"
         ]
-        let hasAccess = testPaths.contains { path in
-            FileManager.default.isReadableFile(atPath: path)
+        for dir in protectedDirs where FileManager.default.fileExists(atPath: dir) {
+            if (try? FileManager.default.contentsOfDirectory(atPath: dir)) != nil {
+                return true
+            }
         }
-        if !hasAccess {
-            showFullDiskAccessAlert = true
+        // Fallback: try to open the system TCC database for reading (FDA-only).
+        let tccDB = "/Library/Application Support/com.apple.TCC/TCC.db"
+        if FileManager.default.fileExists(atPath: tccDB),
+           let fh = try? FileHandle(forReadingFrom: URL(fileURLWithPath: tccDB)) {
+            try? fh.close()
+            return true
         }
+        return false
     }
 
     private func handleLaunchArguments() {
