@@ -15,6 +15,12 @@ final class FileItem: Identifiable, Hashable, Transferable {
     let icon: NSImage
     let isEmptyFolder: Bool
 
+    /// Recursively-computed folder size, filled in on demand (nil until computed).
+    /// Files always know their own size; only directories use this.
+    var computedFolderSize: Int64? = nil
+    /// True while a background size computation is in flight (for a spinner).
+    var isCalculatingSize: Bool = false
+
     static var transferRepresentation: some TransferRepresentation {
         ProxyRepresentation { item in
             item.url as URL
@@ -59,8 +65,22 @@ final class FileItem: Identifiable, Hashable, Transferable {
     }
 
     var formattedSize: String {
-        guard !isDirectory else { return "—" }
+        if isDirectory {
+            guard let size = computedFolderSize else { return "—" }
+            return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+        }
         return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    }
+
+    /// Kick off a one-time background recursive size calculation for a folder.
+    /// Safe to call repeatedly — it no-ops once a size is known or in flight.
+    func calculateFolderSizeIfNeeded(using service: FileSystemService) {
+        guard isDirectory, computedFolderSize == nil, !isCalculatingSize else { return }
+        isCalculatingSize = true
+        service.directorySize(at: url) { [weak self] total in
+            self?.computedFolderSize = total
+            self?.isCalculatingSize = false
+        }
     }
 
     var formattedDate: String {

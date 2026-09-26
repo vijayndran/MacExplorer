@@ -62,6 +62,40 @@ final class FileSystemService {
         return folderURL
     }
 
+    /// Recursively sum the byte size of a directory's contents, on a background
+    /// queue. Reports the total on the main queue. Cancellable via `isCancelled`.
+    /// Bounded by a file-count cap so a pathological tree can't run unbounded.
+    func directorySize(
+        at url: URL,
+        isCancelled: @escaping () -> Bool = { false },
+        completion: @escaping (Int64) -> Void
+    ) {
+        DispatchQueue.global(qos: .utility).async {
+            var total: Int64 = 0
+            var scanned = 0
+            let maxFiles = 200_000
+            let keys: Set<URLResourceKey> = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileSizeKey]
+
+            if let enumerator = self.fileManager.enumerator(
+                at: url,
+                includingPropertiesForKeys: Array(keys),
+                options: [],
+                errorHandler: { _, _ in true } // skip unreadable entries, keep going
+            ) {
+                for case let child as URL in enumerator {
+                    if isCancelled() || scanned >= maxFiles { break }
+                    scanned += 1
+                    let rv = try? child.resourceValues(forKeys: keys)
+                    if rv?.isRegularFile == true {
+                        total += Int64(rv?.totalFileAllocatedSize ?? rv?.fileSize ?? 0)
+                    }
+                }
+            }
+            let result = total
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
     /// Standard sidebar locations.
     var sidebarLocations: [(name: String, url: URL, icon: String)] {
         let home = fileManager.homeDirectoryForCurrentUser

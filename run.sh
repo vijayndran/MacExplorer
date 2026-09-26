@@ -7,12 +7,13 @@ APP_DIR="/Applications/MacExplorer.app"
 ENTITLEMENTS="MacExplorer/MacExplorer.entitlements"
 
 echo "Building..."
-swift build 2>&1 | tail -3
+swift build --disable-sandbox 2>&1 | tail -3
+BIN_DIR="$(swift build --disable-sandbox --show-bin-path 2>/dev/null)"
 
 echo "Deploying to /Applications..."
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
-cp .build/arm64-apple-macosx/debug/MacExplorer "$APP_DIR/Contents/MacOS/MacExplorer"
+cp "$BIN_DIR/MacExplorer" "$APP_DIR/Contents/MacOS/MacExplorer"
 cp MacExplorer/Resources/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns" 2>/dev/null || true
 
 # Write Info.plist (only if missing or needs update)
@@ -64,7 +65,16 @@ EOF
 
 echo "Code signing with entitlements..."
 xattr -cr "$APP_DIR" 2>/dev/null
-codesign --force --sign "MacExplorer Dev" --entitlements "$ENTITLEMENTS" "$APP_DIR"
+# Prefer a stable local identity so Full Disk Access persists across rebuilds.
+# (An ad-hoc signature changes every build, so macOS re-prompts for FDA each time.)
+# Create the cert once with setup-signing.sh; falls back to ad-hoc if absent.
+if security find-certificate -c "MacExplorer Local" >/dev/null 2>&1; then
+    SIGN_ID="MacExplorer Local"
+else
+    echo "  (no 'MacExplorer Local' cert found — using ad-hoc; FDA will re-prompt each build. Run ./setup-signing.sh once to fix.)"
+    SIGN_ID="-"
+fi
+codesign --force --sign "$SIGN_ID" --entitlements "$ENTITLEMENTS" --identifier "com.macexplorer.app" "$APP_DIR"
 
 echo "Registering with Launch Services..."
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$APP_DIR"

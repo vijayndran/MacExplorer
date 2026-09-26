@@ -66,8 +66,17 @@ struct FileListView: View {
             .width(min: 200, ideal: 300)
 
             TableColumn("Size", sortUsing: KeyPathComparator(\.size)) { item in
-                Text(item.formattedSize)
-                    .foregroundStyle(.secondary)
+                Group {
+                    if item.isDirectory && item.isCalculatingSize && item.computedFolderSize == nil {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Text(item.formattedSize)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .onAppear {
+                    item.calculateFolderSizeIfNeeded(using: appState.fileService)
+                }
             }
             .width(min: 60, ideal: 80)
 
