@@ -1,4 +1,5 @@
 import AppKit
+import MacExplorerCore
 
 /// Moves items to trash with confirmation for non-empty folders.
 enum TrashHelper {
@@ -9,7 +10,9 @@ enum TrashHelper {
         let nonEmptyFolders = urls.filter { url in
             let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
             let isPackage = (try? url.resourceValues(forKeys: [.isPackageKey]))?.isPackage ?? false
-            return isDir && !isPackage && !service.isDirectoryEmpty(url)
+            return GuardLogic.needsNonEmptyConfirmation(
+                isDirectory: isDir, isPackage: isPackage, isEmpty: service.isDirectoryEmpty(url)
+            )
         }
 
         if !nonEmptyFolders.isEmpty {
@@ -28,14 +31,10 @@ enum TrashHelper {
             guard response == .alertFirstButtonReturn else { return false }
         }
 
-        var failures: [(name: String, error: Error)] = []
-        for url in urls {
-            do {
-                try service.moveToTrash(url)
-            } catch {
-                failures.append((name: url.lastPathComponent, error: error))
-            }
+        let outcome = GuardLogic.trashBatch(urls) { url in
+            try service.moveToTrash(url)
         }
+        let failures = outcome.failures
         refreshAction()
 
         if !failures.isEmpty {

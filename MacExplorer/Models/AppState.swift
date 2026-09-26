@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import MacExplorerCore
 
 /// Top-level application state managing tabs and global preferences.
 @Observable
@@ -181,10 +182,12 @@ final class AppState {
     func renameWithUndo(at url: URL, to newName: String) -> URL? {
         let oldName = url.lastPathComponent
         guard !newName.isEmpty, newName != oldName else { return nil }
-        let newURL = url.deletingLastPathComponent().appendingPathComponent(newName)
+        let directory = url.deletingLastPathComponent()
+        let newURL = directory.appendingPathComponent(newName)
 
         // Guard against clobbering an existing item at the target name.
-        if FileManager.default.fileExists(atPath: newURL.path) {
+        // Decision delegated to GuardLogic (unit-tested); presentation stays here.
+        if GuardLogic.renameShouldBlock(oldName: oldName, newName: newName, in: directory) {
             let alert = NSAlert()
             alert.messageText = "Name Already Taken"
             alert.informativeText = "An item named \"\(newName)\" already exists in this folder. \"\(oldName)\" was not renamed."
