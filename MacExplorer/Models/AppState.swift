@@ -30,6 +30,8 @@ final class AppState {
 
     let fileService = FileSystemService()
     let directoryWatcher = DirectoryWatcher()
+    /// In-flight copy/paste progress, surfaced as a sheet. nil sheet when inactive.
+    let copyProgress = CopyProgress()
     /// Paths the sidebar is currently watching (expanded folders)
     var watchedSidebarPaths: Set<String> = [] {
         didSet { rebuildWatcher() }
@@ -306,17 +308,88 @@ final class AppState {
     }
 
     /// Paste file URLs from the pasteboard into the current tab, with undo,
-    /// then select the pasted items. Extracted from the view body.
+    /// then select the pasted items. The copy runs on a BACKGROUND queue with
+    /// progress + cancellation so a slow destination (e.g. an ExFAT USB volume)
+    /// no longer blocks the main thread and hangs the app ("Not Responding").
+    @MainActor
     func pasteIntoCurrentTab() {
         guard let tab = currentTab else { return }
         let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
         guard let objects = NSPasteboard.general.readObjects(forClasses: [NSURL.self], options: options),
               let urls = objects as? [URL], !urls.isEmpty else { return }
 
-        let pastedURLs = pasteWithUndo(urls: urls, to: tab.currentPath)
-        refreshCurrentTab()
-        guard let lastURL = pastedURLs.last else { return }
+        let destination = tab.currentPath
+        // Resolve unique targets up front (main actor — touches the fs but only stat).
+        let jobs: [(src: URL, dst: URL)] = urls.map { src in
+            (src, uniqueURL(for: destination.appendingPathComponent(src.lastPathComponent)))
+        }
 
+        let progress = copyProgress
+        let flag = progress.cancelFlag
+        progress.begin(totalCount: jobs.count, bytesTotal: 0)
+
+        Task.detached(priority: .userInitiated) {
+            // Sizing pass (background) so the bar is determinate.
+            let total = CopyEngine.totalSize(of: jobs.map(\.src))
+            await MainActor.run { progress.bytesTotal = total }
+
+            var pastedURLs: [URL] = []
+            var running: Int64 = 0
+
+            for (i, job) in jobs.enumerated() {
+                if flag.isCancelled { break }
+                await MainActor.run {
+                    progress.currentIndex = i + 1
+                    progress.currentFileName = job.src.lastPathComponent
+                }
+                do {
+                    try CopyEngine.copy(
+                        from: job.src,
+                        to: job.dst,
+                        isCancelled: { flag.isCancelled },
+                        onBytes: { n in
+                            running += n
+                            let snapshot = running
+                            Task { @MainActor in progress.bytesCompleted = snapshot }
+                        }
+                    )
+                    pastedURLs.append(job.dst)
+                } catch {
+                    // Cancelled or I/O error: remove the partial copy, stop.
+                    try? FileManager.default.removeItem(at: job.dst)
+                    if flag.isCancelled { break }
+                }
+            }
+
+            let done = pastedURLs
+            await MainActor.run {
+                progress.finish()
+                self.finishPaste(pastedURLs: done, originalURLs: urls, destination: destination, in: tab)
+            }
+        }
+    }
+
+    /// Main-actor completion of an async paste: register undo, refresh, reselect.
+    @MainActor
+    private func finishPaste(pastedURLs: [URL], originalURLs: [URL], destination: URL, in tab: TabState) {
+        refreshCurrentTab()
+        guard !pastedURLs.isEmpty else { return }
+
+        // Undo removes exactly what we pasted; redo re-runs the async paste path
+        // by copying the originals again.
+        undoManager.registerUndo(withTarget: self) { [pastedURLs, originalURLs] state in
+            for url in pastedURLs { try? FileManager.default.removeItem(at: url) }
+            state.refreshCurrentTab()
+            state.syncUndoState()
+            state.undoManager.registerUndo(withTarget: state) { redoState in
+                _ = redoState.pasteWithUndo(urls: originalURLs, to: destination)
+            }
+            state.undoManager.setActionName("Paste")
+        }
+        undoManager.setActionName("Paste")
+        syncUndoState()
+
+        guard let lastURL = pastedURLs.last else { return }
         let pastedNames: Set<String> = Set(pastedURLs.map { $0.lastPathComponent })
         guard tab.items.contains(where: { $0.name == lastURL.lastPathComponent }) else { return }
         let selectedIDs = tab.items.filter { pastedNames.contains($0.name) }.map { $0.id }

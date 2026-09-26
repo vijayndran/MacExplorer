@@ -137,6 +137,12 @@ struct ExplorerWindow: View {
             } message: {
                 Text("MacExplorer needs Full Disk Access to browse all folders.\n\n1. Click \"Open System Settings\" below\n2. Click the + button in Full Disk Access\n3. Select MacExplorer from the Finder window that opens\n\nAlternatively, drag MacExplorer.app into the list.")
             }
+            .sheet(isPresented: Binding(
+                get: { appState.copyProgress.isActive },
+                set: { if !$0 { appState.copyProgress.requestCancel() } }
+            )) {
+                CopyProgressSheet(progress: appState.copyProgress)
+            }
     }
 
     private func findMyWindow() -> NSWindow? {
