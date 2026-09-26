@@ -96,10 +96,12 @@ extension Notification.Name {
 struct ExplorerWindow: View {
     @State private var appState = AppState()
     @State private var showFullDiskAccessAlert = false
+    @State private var hostWindow: NSWindow?
 
     var body: some View {
         ContentView()
             .environment(appState)
+            .background(WindowAccessor(onResolve: setHostWindow))
             .onAppear {
                 WindowManager.shared.register(appState)
                 checkFullDiskAccess()
@@ -114,118 +116,7 @@ struct ExplorerWindow: View {
                     NSApp.keyWindow?.close()
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .newTab)) { _ in
-                if NSApp.keyWindow == findMyWindow() {
-                    appState.addTab()
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .closeTab)) { _ in
-                if NSApp.keyWindow == findMyWindow() {
-                    appState.closeCurrentTab()
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .togglePreview)) { _ in
-                if NSApp.keyWindow == findMyWindow() {
-                    appState.showPreview.toggle()
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .navigateBack)) { _ in
-                if NSApp.keyWindow == findMyWindow() {
-                    appState.currentTab?.goBack()
-                    appState.refreshCurrentTab()
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .navigateForward)) { _ in
-                if NSApp.keyWindow == findMyWindow() {
-                    appState.currentTab?.goForward()
-                    appState.refreshCurrentTab()
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .moveToTrash)) { _ in
-                if NSApp.keyWindow == findMyWindow(), let tab = appState.currentTab {
-                    let items = tab.items.filter { tab.selectedItems.contains($0.id) }
-                    guard !items.isEmpty else { return }
-                    let allItems = tab.items
-                    let deletedIDs = Set(items.map(\.id))
-                    var nextName: String?
-                    if let lastIndex = allItems.lastIndex(where: { deletedIDs.contains($0.id) }) {
-                        if lastIndex + 1 < allItems.count, !deletedIDs.contains(allItems[lastIndex + 1].id) {
-                            nextName = allItems[lastIndex + 1].name
-                        } else if let prev = allItems[0...lastIndex].last(where: { !deletedIDs.contains($0.id) }) {
-                            nextName = prev.name
-                        }
-                    }
-                    // Check for non-empty folders before trashing
-                    let nonEmptyFolders = items.filter { item in
-                        item.isDirectory && !appState.fileService.isDirectoryEmpty(item.url)
-                    }
-                    if !nonEmptyFolders.isEmpty {
-                        let alert = NSAlert()
-                        alert.messageText = "Move to Trash?"
-                        if nonEmptyFolders.count == 1 {
-                            alert.informativeText = "\"\(nonEmptyFolders[0].name)\" is not empty. Are you sure?"
-                        } else {
-                            alert.informativeText = "\(nonEmptyFolders.count) folders are not empty. Are you sure?"
-                        }
-                        alert.alertStyle = .warning
-                        alert.addButton(withTitle: "Move to Trash")
-                        alert.addButton(withTitle: "Cancel")
-                        guard alert.runModal() == .alertFirstButtonReturn else { return }
-                    }
-                    appState.trashWithUndo(urls: items.map(\.url))
-                    appState.refreshCurrentTab()
-                    if let nextName {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                            if let item = tab.items.first(where: { $0.name == nextName }) {
-                                tab.selectedItems = [item.id]
-                                appState.scrollToItemID = item.id
-                            }
-                        }
-                    }
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .copyFiles)) { _ in
-                if NSApp.keyWindow == findMyWindow(), let tab = appState.currentTab {
-                    let items = tab.items.filter { tab.selectedItems.contains($0.id) }
-                    guard !items.isEmpty else { return }
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.writeObjects(items.map(\.url) as [NSURL])
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .pasteFiles)) { _ in
-                if NSApp.keyWindow == findMyWindow(), let tab = appState.currentTab {
-                    guard let urls = NSPasteboard.general.readObjects(forClasses: [NSURL.self], options: [
-                        .urlReadingFileURLsOnly: true
-                    ]) as? [URL], !urls.isEmpty else { return }
-                    let dest = tab.currentPath
-                    let pastedURLs = appState.pasteWithUndo(urls: urls, to: dest)
-                    appState.refreshCurrentTab()
-                    if let lastURL = pastedURLs.last {
-                        let pastedNames = pastedURLs.map(\.lastPathComponent)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                            if let item = tab.items.first(where: { $0.name == lastURL.lastPathComponent }) {
-                                tab.selectedItems = Set(tab.items.filter { pastedNames.contains($0.name) }.map(\.id))
-                                appState.scrollToItemID = item.id
-                            }
-                        }
-                    }
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .settingsChanged)) { _ in
-                appState.showPreview = UserDefaults.standard.object(forKey: "showPreview") as? Bool ?? true
-                appState.showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .undoAction)) { _ in
-                if NSApp.keyWindow == findMyWindow(), appState.undoManager.canUndo {
-                    appState.undoManager.undo()
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .redoAction)) { _ in
-                if NSApp.keyWindow == findMyWindow(), appState.undoManager.canRedo {
-                    appState.undoManager.redo()
-                }
-            }
+            .modifier(CommandHandlers(appState: appState, isMine: isMyWindowKey))
             .alert("Full Disk Access Required", isPresented: $showFullDiskAccessAlert) {
                 Button("Open System Settings") {
                     NSWorkspace.shared.open(
@@ -246,10 +137,17 @@ struct ExplorerWindow: View {
     }
 
     private func findMyWindow() -> NSWindow? {
-        NSApp.windows.first { window in
-            window.contentView?.subviews.contains(where: { _ in true }) == true &&
-            window.isKeyWindow
-        }
+        hostWindow
+    }
+
+    /// Cheap Bool guard reused by every command handler — pulling this out of
+    /// the view body keeps the (already large) modifier chain type-checkable.
+    private var isMyWindowKey: Bool {
+        hostWindow != nil && NSApp.keyWindow === hostWindow
+    }
+
+    private func setHostWindow(_ window: NSWindow?) {
+        hostWindow = window
     }
 
     private func checkFullDiskAccess() {
@@ -302,5 +200,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 targetState?.navigate(to: url)
             }
         }
+    }
+}
+
+/// Captures the NSWindow hosting this SwiftUI view, so per-window command
+/// routing can reliably identify "my" window instead of guessing.
+struct WindowAccessor: NSViewRepresentable {
+    let onResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { onResolve(view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { onResolve(nsView.window) }
+    }
+}
+
+/// Hosts every menu-command NotificationCenter handler in one modifier so the
+/// window's main `body` stays small enough for the Swift type-checker. `isMine`
+/// is the "am I the key window" guard, evaluated where the modifier is applied.
+private struct CommandHandlers: ViewModifier {
+    let appState: AppState
+    let isMine: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .newTab)) { _ in
+                if isMine { appState.addTab() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .closeTab)) { _ in
+                if isMine { appState.closeCurrentTab() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .togglePreview)) { _ in
+                if isMine { appState.showPreview.toggle() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .navigateBack)) { _ in
+                if isMine {
+                    appState.currentTab?.goBack()
+                    appState.refreshCurrentTab()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .navigateForward)) { _ in
+                if isMine {
+                    appState.currentTab?.goForward()
+                    appState.refreshCurrentTab()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .moveToTrash)) { _ in
+                if isMine { appState.trashSelectedInCurrentTab() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .copyFiles)) { _ in
+                if isMine { appState.copySelectedInCurrentTab() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pasteFiles)) { _ in
+                if isMine { appState.pasteIntoCurrentTab() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .settingsChanged)) { _ in
+                appState.showPreview = UserDefaults.standard.object(forKey: "showPreview") as? Bool ?? true
+                appState.showHiddenFiles = UserDefaults.standard.bool(forKey: "showHiddenFiles")
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .undoAction)) { _ in
+                if isMine, appState.undoManager.canUndo { appState.undoManager.undo() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .redoAction)) { _ in
+                if isMine, appState.undoManager.canRedo { appState.undoManager.redo() }
+            }
     }
 }

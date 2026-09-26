@@ -182,6 +182,18 @@ final class AppState {
         let oldName = url.lastPathComponent
         guard !newName.isEmpty, newName != oldName else { return nil }
         let newURL = url.deletingLastPathComponent().appendingPathComponent(newName)
+
+        // Guard against clobbering an existing item at the target name.
+        if FileManager.default.fileExists(atPath: newURL.path) {
+            let alert = NSAlert()
+            alert.messageText = "Name Already Taken"
+            alert.informativeText = "An item named \"\(newName)\" already exists in this folder. \"\(oldName)\" was not renamed."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return nil
+        }
+
         do {
             try FileManager.default.moveItem(at: url, to: newURL)
         } catch {
@@ -228,6 +240,87 @@ final class AppState {
         sidebarReloadToken += 1
         syncUndoState()
         return true
+    }
+
+    /// Trash the current tab's selected items: computes the next selection,
+    /// confirms non-empty folders, trashes with undo, then reselects.
+    /// Extracted from the view so the command-handler body stays type-checkable.
+    func trashSelectedInCurrentTab() {
+        guard let tab = currentTab else { return }
+        let items = tab.items.filter { tab.selectedItems.contains($0.id) }
+        guard !items.isEmpty else { return }
+
+        let allItems = tab.items
+        let deletedIDs = Set(items.map(\.id))
+        var nextName: String?
+        if let lastIndex = allItems.lastIndex(where: { deletedIDs.contains($0.id) }) {
+            if lastIndex + 1 < allItems.count, !deletedIDs.contains(allItems[lastIndex + 1].id) {
+                nextName = allItems[lastIndex + 1].name
+            } else if let prev = allItems[0...lastIndex].last(where: { !deletedIDs.contains($0.id) }) {
+                nextName = prev.name
+            }
+        }
+
+        // Confirm before trashing non-empty folders (packages excluded).
+        let nonEmptyFolders = items.filter { item in
+            item.isDirectory
+                && !((try? item.url.resourceValues(forKeys: [.isPackageKey]))?.isPackage ?? false)
+                && !fileService.isDirectoryEmpty(item.url)
+        }
+        if !nonEmptyFolders.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "Move to Trash?"
+            if nonEmptyFolders.count == 1 {
+                alert.informativeText = "\"\(nonEmptyFolders[0].name)\" is not empty. Are you sure?"
+            } else {
+                alert.informativeText = "\(nonEmptyFolders.count) folders are not empty. Are you sure?"
+            }
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Move to Trash")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
+        trashWithUndo(urls: items.map(\.url))
+        refreshCurrentTab()
+        // refreshCurrentTab() repopulates tab.items synchronously,
+        // so reselect immediately rather than racing a fixed timer.
+        if let nextName, let item = tab.items.first(where: { $0.name == nextName }) {
+            tab.selectedItems = [item.id]
+            scrollToItemID = item.id
+        }
+    }
+
+    /// Copy the current tab's selected item URLs to the pasteboard.
+    func copySelectedInCurrentTab() {
+        guard let tab = currentTab else { return }
+        let items = tab.items.filter { tab.selectedItems.contains($0.id) }
+        guard !items.isEmpty else { return }
+        let urls: [NSURL] = items.map { $0.url as NSURL }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.writeObjects(urls)
+    }
+
+    /// Paste file URLs from the pasteboard into the current tab, with undo,
+    /// then select the pasted items. Extracted from the view body.
+    func pasteIntoCurrentTab() {
+        guard let tab = currentTab else { return }
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        guard let objects = NSPasteboard.general.readObjects(forClasses: [NSURL.self], options: options),
+              let urls = objects as? [URL], !urls.isEmpty else { return }
+
+        let pastedURLs = pasteWithUndo(urls: urls, to: tab.currentPath)
+        refreshCurrentTab()
+        guard let lastURL = pastedURLs.last else { return }
+
+        let pastedNames: Set<String> = Set(pastedURLs.map { $0.lastPathComponent })
+        guard tab.items.contains(where: { $0.name == lastURL.lastPathComponent }) else { return }
+        let selectedIDs = tab.items.filter { pastedNames.contains($0.name) }.map { $0.id }
+        tab.selectedItems = Set(selectedIDs)
+        if let scrollItem = tab.items.first(where: { $0.name == lastURL.lastPathComponent }) {
+            scrollToItemID = scrollItem.id
+        }
     }
 
     /// Create a folder with undo support. Returns the created folder URL.

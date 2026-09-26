@@ -28,10 +28,30 @@ enum TrashHelper {
             guard response == .alertFirstButtonReturn else { return false }
         }
 
+        var failures: [(name: String, error: Error)] = []
         for url in urls {
-            try? service.moveToTrash(url)
+            do {
+                try service.moveToTrash(url)
+            } catch {
+                failures.append((name: url.lastPathComponent, error: error))
+            }
         }
         refreshAction()
-        return true
+
+        if !failures.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = failures.count == 1 ? "Couldn't Move to Trash" : "Some Items Couldn't Be Moved to Trash"
+            if failures.count == 1 {
+                alert.informativeText = "\"\(failures[0].name)\" could not be moved to the Trash.\n\n\(failures[0].error.localizedDescription)"
+            } else {
+                let names = failures.prefix(5).map { "\"\($0.name)\"" }.joined(separator: ", ")
+                let extra = failures.count > 5 ? " and \(failures.count - 5) more" : ""
+                alert.informativeText = "\(names)\(extra) could not be moved to the Trash."
+            }
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+        return failures.count < urls.count
     }
 }
